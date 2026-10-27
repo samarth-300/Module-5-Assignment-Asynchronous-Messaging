@@ -61,14 +61,14 @@ rm -f processed_events.txt
 docker exec rabbitmq rabbitmqctl purge_queue orders
 ```
 
-Worker options used in the demos:
+Options used in the demos:
 
-| Flag | Meaning |
+| Command | Meaning |
 |---|---|
-| `--crash-on ORD-1` | Kill the worker when it receives `ORD-1`, **before** processing and ACK |
-| `--crash-on ORD-1 --crash-after-process` | Process the order, then kill the worker **before** the ACK |
-
-Producer options: `--count N`, `--start N`, `--duplicate` (re-publishes the last message with the same `event_id`).
+| `worker.py --crash-on ORD-1` | Kill the worker when it receives `ORD-1`, **before** processing and ACK |
+| `worker.py --crash-on ORD-1 --crash-after-process` | Process the order, then kill the worker **before** the ACK |
+| `producer.py --count N --start N` | Publish N orders starting at `ORD-<start>` |
+| `producer.py --duplicate` | Re-publish the last message with the **same** `event_id` |
 
 ## 1. Successful message processing
 
@@ -115,7 +115,7 @@ No order appears in both logs, and all 6 orders were processed and ACKed.
 
 ## 3. Failure and redelivery
 
-**Setup:** `worker-A` was started with `--crash-on ORD-1`, and a single order (`ORD-1`) was published.
+**Setup:** `worker-A` was started with `--crash-on ORD-1`, and a single order (`ORD-1`, `event_id=8fb5a6ef`) was published.
 
 ### Step 1: worker-A receives the message and dies before the ACK
 
@@ -137,47 +137,71 @@ RabbitMQ detected the closed connection and put the message back: **Ready = 1, U
 
 ### Step 3: worker-B receives the same message again
 
-<!-- PASTE the real worker-B output here. It should include redelivered=True and the same event_id=8fb5a6ef -->
+`worker-B` was then started. It received the **same** `event_id=8fb5a6ef` with `redelivered=True`, processed it, and ACKed:
 
 ```
-PASTE worker-B LOG HERE
+[00:06:43] [worker-B] Waiting for messages. Ctrl+C to stop.
+[00:06:43] [worker-B] RECEIVED order=ORD-1 event_id=8fb5a6ef redelivered=True
+[00:06:43] [worker-B] PROCESSING order=ORD-1 item=ITEM-101 qty=2
+[00:06:45] [worker-B] DONE order=ORD-1
+[00:06:45] [worker-B] ACK sent order=ORD-1
 ```
 
 ![worker-B redelivery](screenshots/6-redelivered-worker-B.png)
 
 ### Step 4: the system keeps running
 
-<!-- PASTE worker-B output after running: python producer.py --count 2 --start 2 -->
+New orders published afterwards (`producer.py --count 2 --start 2`) were processed normally by the same worker:
 
 ```
-PASTE LOG HERE
+[00:07:59] [worker-B] RECEIVED order=ORD-2 event_id=d23a6ea6 redelivered=False
+[00:07:59] [worker-B] PROCESSING order=ORD-2 item=ITEM-102 qty=3
+[00:08:01] [worker-B] DONE order=ORD-2
+[00:08:01] [worker-B] ACK sent order=ORD-2
+[00:08:01] [worker-B] RECEIVED order=ORD-3 event_id=80038ceb redelivered=False
+[00:08:01] [worker-B] PROCESSING order=ORD-3 item=ITEM-103 qty=4
+[00:08:03] [worker-B] DONE order=ORD-3
+[00:08:03] [worker-B] ACK sent order=ORD-3
 ```
 
 ## 4. Duplicate handling
 
 The worker stores each processed `event_id` in `processed_events.txt`. If an `event_id` has already been processed, it logs a duplicate, skips the business action, and still ACKs so the message is removed from the queue.
 
-Test: `python producer.py --count 2 --duplicate` publishes the last order twice with the same `event_id`.
+Test: `python producer.py --count 2 --duplicate` publishes ORD-1, ORD-2, and then ORD-2 again with the **same** `event_id` (`033ac7cb`). Both workers were running, so ORD-1 went to worker-B while ORD-2 and its duplicate went to worker-A.
 
 **Producer**
 
-<!-- PASTE producer output here (it should include the "Re-publishing last message with the SAME event_id" line) -->
-
 ```
-PASTE LOG HERE
+[00:15:40] [producer] Published {'event_id': '9ff51bcc-26b5-47c6-b4da-56545ae53409', 'order_id': 'ORD-1', 'item_id': 'ITEM-101', 'quantity': 2}
+[00:15:40] [producer] Published {'event_id': '033ac7cb-1886-4894-bfe0-00a7ffed0329', 'order_id': 'ORD-2', 'item_id': 'ITEM-102', 'quantity': 3}
+[00:15:40] [producer] Re-publishing last message with the SAME event_id (simulated duplicate)
+[00:15:40] [producer] Published {'event_id': '033ac7cb-1886-4894-bfe0-00a7ffed0329', 'order_id': 'ORD-2', 'item_id': 'ITEM-102', 'quantity': 3}
 ```
 
 ![duplicate producer](screenshots/7-duplicate-producer.png)
 
-**Worker**
-
-<!-- PASTE worker output here (it should include "DUPLICATE detected ... skipping business action") -->
+**Worker-A:** ORD-2 is processed once; the second copy is detected as a duplicate and the business action is skipped:
 
 ```
-PASTE LOG HERE
+[00:15:30] [worker-A] Waiting for messages. Ctrl+C to stop.
+[00:15:40] [worker-A] RECEIVED order=ORD-2 event_id=033ac7cb redelivered=False
+[00:15:40] [worker-A] PROCESSING order=ORD-2 item=ITEM-102 qty=3
+[00:15:42] [worker-A] DONE order=ORD-2
+[00:15:42] [worker-A] ACK sent order=ORD-2
+[00:15:42] [worker-A] RECEIVED order=ORD-2 event_id=033ac7cb redelivered=False
+[00:15:42] [worker-A] DUPLICATE detected event_id=033ac7cb order=ORD-2 -> skipping business action
+[00:15:42] [worker-A] ACK sent (duplicate) order=ORD-2
 ```
 
 ![duplicate worker](screenshots/8-duplicate-worker.png)
+
+**Worker-B** handled ORD-1 (`event_id=9ff51bcc`) normally.
+
+## Notes and limitations
+
+- Deduplication uses a simple shared file (`processed_events.txt`), which is enough for this lab. Two workers receiving the same `event_id` at the exact same instant could race; a production system would use an atomic store such as a database unique constraint or Redis `SETNX`.
+- A message is recorded as processed *before* the ACK. If a worker crashes between those two steps (`--crash-after-process`), the redelivered message is correctly detected as a duplicate.
 
 ## Reflection
 
